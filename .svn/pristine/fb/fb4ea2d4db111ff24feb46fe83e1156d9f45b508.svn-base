@@ -1,0 +1,40 @@
+package edu.upenn.cis.cis455.webserver;
+
+public class PoolThread extends Thread{
+	    private BlockingQueue taskQueue = null;
+	    private boolean isStopped = false;
+	    private boolean isRunning = false; 
+	    public PoolThread(BlockingQueue queue){
+	        taskQueue = queue;
+	    }
+
+	    public void run(){
+	        while(!isStopped()){
+	            try{
+	                Runnable runnable = (Runnable) taskQueue.dequeue();
+	                isRunning = true;
+	                runnable.run();
+	                isRunning = false;
+	            } catch(InterruptedException e){
+	            	System.out.println("Shutting down thread");
+	            	return;
+	                //log or otherwise report exception,
+	            }
+	        }
+	    }
+
+	    public synchronized void doStop(){
+	    	if((this.getState() == Thread.State.WAITING)||(isRunning == false))
+	    	{
+	    		this.interrupt();
+	    	}
+	    	else
+	    	{
+	    		isStopped = true;
+	    	}
+	    }
+
+	    public synchronized boolean isStopped(){
+	        return isStopped;
+	    }
+}

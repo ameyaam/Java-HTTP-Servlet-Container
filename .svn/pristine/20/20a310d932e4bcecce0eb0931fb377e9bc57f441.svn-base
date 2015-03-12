@@ -1,0 +1,630 @@
+package edu.upenn.cis.cis455.webserver;
+
+import java.io.*;
+import java.net.*;
+import java.util.*;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.text.ParseException;
+
+
+
+interface shutdownThreads {
+	void stopThreads();
+}
+
+public class HttpServer
+	{
+		public static ThreadPool threadPool;
+		public static int port;
+		public static String rootPath;
+		static boolean shutdownFlag = false;
+		public static void main(String[] args)
+		{
+			try{
+				if(args.length != 2)
+				{
+					System.out.println("Name: Ameya More\nSEAS login: ameyam ");
+					return;
+				}
+				port = Integer.parseInt(args[0]);
+				rootPath = args[1];
+				System.out.println("Port: " + port + "\nroot: " + rootPath);
+				/*TODO: Change the number of threads to correct value before submitting*/
+				threadPool = new ThreadPool(10,10);
+				ServerSocket Server = new ServerSocket (port, 10, InetAddress.getByName("127.0.0.1"));
+				System.out.println ("TCPServer Waiting for client on port " + port);
+	
+				while(true) {	
+					Socket connected = Server.accept();
+
+					BufferedReader checkForShutdown = new BufferedReader(new InputStreamReader (connected.getInputStream()));
+					DataOutputStream outToClient = new DataOutputStream(connected.getOutputStream());
+					
+					String requestString = checkForShutdown.readLine();
+					StringTokenizer tokenizer = new StringTokenizer(requestString);
+					
+					System.out.println("request line:" + requestString);
+					String httpMethod = tokenizer.nextToken();
+					System.out.println("from daemon " + httpMethod);
+					String requestPath = tokenizer.nextToken();
+					System.out.println("requstpath: " + requestPath);
+					/*Code to handle absolute paths*/
+					if(requestPath.startsWith("http://"))
+					{
+						int i, count = 4;
+						for(i = 0; i < requestPath.length(); i++)
+						{
+							if(requestPath.charAt(i) == '/')
+							{
+								count--;
+							}
+							if(count == 0)
+								break;
+						}
+						i++;
+						requestPath = requestPath.substring(i);
+					}
+					
+					System.out.println("from daemon " + requestPath);
+					if(requestPath.endsWith("shutdown"))
+					{
+						System.out.println("Stopping threads and shutting down server");
+						String responseString = "<html><body><h4 align = \"center\"> Server is shutting down...</h4></body></html>";
+						outToClient.writeBytes("HTTP/1.1 200 OK" + "\r\n");
+						outToClient.writeBytes("Server: Java HTTPServer" + "\r\n");
+						outToClient.writeBytes("Content-Type: text/html" + "\r\n");
+						outToClient.writeBytes("Content-Length: " + Integer.toString(responseString.length()) + "\r\n");
+						outToClient.writeBytes("Connection: close\r\n");
+						outToClient.writeBytes("\r\n");
+						outToClient.writeBytes(responseString);
+						outToClient.close();
+						/*Call stop method of threadPool to stop threads*/
+						threadPool.stop();
+						return;
+					}
+					String httpVersion = tokenizer.nextToken();
+					
+					HttpRequestHandler handler = new HttpRequestHandler(connected, checkForShutdown, outToClient, httpMethod, httpVersion, requestPath);
+					try {
+						threadPool.execute(handler);
+					} catch (Exception e) {
+						// TODO Auto-generated catch block
+						e.printStackTrace();
+					}
+				}
+			} catch(IOException e){
+				e.printStackTrace();
+			}
+		}
+		
+		static String getControlPanel(int port)
+		{	
+			String outputString = "<h4 align = \"center\">Name: Ameya More</h4>"
+					+ "<h4 align = \"center\">Penn key: ameyam</h4>"
+					//+ "<form action = \"http://localhost:"+ port +"/shutdown\"> <input type = \"submit\" value = \"Shutdown\"> </form>"
+					+ "<p align = \"center\"><a href = \"http://localhost:"+ port +"/shutdown\"> <button> Shutdown </button></a></p>"
+					+ "<table border = \"1\" align = \"center\">"
+						+ "<tr><th>Thread</th><th>URL</th><th>Status</th></tr>";
+			int threadNum = 0;
+			for(PoolThread thread : threadPool.threads)
+			{
+				outputString = outputString + "<tr><td>" + Integer.toString(threadNum) + "</td><td>"
+						+ thread.currentUrl +"</td><td>"+ thread.getState() + "</td></tr>";
+				threadNum++;
+			}
+			outputString = outputString + "</table>";
+			return outputString;
+		}
+
+		static HashMap<String, String> parseHttpHeaders(BufferedReader headerBuffer) throws IOException
+		{
+			
+			HashMap<String, String> headerMap = new HashMap<String, String>();
+			String headerLine;
+			String headerValuePair[];
+			String value;
+			int i;
+			boolean first;
+			while(true)
+			{
+				first = true;
+				value = "";
+				headerLine = headerBuffer.readLine();
+				if(headerLine.length() == 0)
+				{
+					break;
+				}
+				headerValuePair = headerLine.split(":");
+				for(i = 1; i < headerValuePair.length; i++)
+				{
+					if(first)
+					{
+						value = value + headerValuePair[i];
+						first = false;
+					}
+					else
+						value = value + ":" + headerValuePair[i];
+				}
+				//System.out.println("Key: " + headerValuePair[0] + " value: " + value);
+				headerMap.put(headerValuePair[0], value.replaceFirst(" ", ""));
+			}
+			return headerMap;
+			/*
+			boolean multiline = false;
+			while(true)
+			{
+				i = 0;
+				headerLine = headerBuffer.readLine();
+				System.out.println("inside parser: " + headerLine);
+				if(headerLine == "")
+				{
+					break;
+				}
+				headerValuePair = headerLine.split(":");
+				while(headerValuePair[1].endsWith(","))
+				{
+					TODO: handle case with headers on multiple lines
+					multiline = true;
+					values[i] = headerValuePair[1].replace(",","");
+					i++;
+					headerValuePair[1] = headerBuffer.readLine();
+				}
+				if(multiline == true)
+				{
+					values[i] = headerValuePair[1];
+					multiline = false;
+				}
+				else
+				{
+					values = headerValuePair[1].split(",");
+				}
+				headerMap.put(headerValuePair[0], values);
+			}
+			return headerMap;
+		*/
+		}
+		
+		 public static class HttpRequestHandler extends Thread {
+			Socket connectedClient;
+			String httpVersion;
+			String httpMethod;
+			BufferedReader inFromClient;
+			public String RequestPath;
+			public String currentUrl;
+			DataOutputStream outToClient;
+			private HttpRequestHandler(Socket s, BufferedReader in, DataOutputStream out, String method, String version , String reqpath){
+				this.connectedClient = s;
+				this.httpVersion = version;
+				this.httpMethod = method;
+				this.inFromClient = in;
+				this.RequestPath = reqpath;
+				this.currentUrl = "http://localhost/" + reqpath.replaceFirst("/", "");
+				this.outToClient = out;
+			}
+			
+			static Date convertStringToDate(String inputDate)
+			{
+				System.out.println("received this: " + inputDate);
+				Date receivedDateObj = new Date();
+				inputDate = inputDate.replace(" GMT", "");
+				String[] formats = {//"ddd, dd mmm yyyy HH:mm:ss", 
+									"EEE, dd MMM yyyy HH:mm:ss",
+									"EEEE, dd-MMM-yy HH:mm:ss", 
+									"EEE MMM dd HH:mm:ss yyyy"};
+				
+				for (String parse : formats) {
+	                	
+	                try {
+	                	SimpleDateFormat formatter = new SimpleDateFormat(parse);
+	                	//System.out.println(inputDate);
+	                	//formatter.setTimeZone(TimeZone.getTimeZone("UTC"));
+	                    receivedDateObj = formatter.parse(inputDate);
+	                    //System.out.println("PARSE SUCCESSFUL");
+	                    return receivedDateObj;
+	                    //System.out.println("Printing the value of " + parse);
+	                } catch (ParseException e) {
+
+	                }
+	            }
+				return receivedDateObj;
+			}
+			
+			static String getServerTime() {
+		        Calendar calendar = Calendar.getInstance();
+		        SimpleDateFormat dateFormat = new SimpleDateFormat(
+		                "EEE, dd MMM yyyy HH:mm:ss z", Locale.US);
+		        dateFormat.setTimeZone(TimeZone.getTimeZone("GMT"));
+		        return dateFormat.format(calendar.getTime());
+		    }
+			static boolean processIfUnmodifiedSince(String receivedDateString, File requiredObject, DataOutputStream outToClient) throws IOException
+			{
+				Date lastModified = new Date(requiredObject.lastModified());
+				Date receivedDate = convertStringToDate(receivedDateString);
+		
+				if(receivedDate != null)
+				{
+					System.out.println("Parsed this date: " + receivedDate);
+					if(lastModified.after(receivedDate))
+					{
+						String statusLine = "HTTP/1.1 412 Precondition failed" + "\r\n";
+						String contentTypeLine = "Content-Type: text/html" + "\r\n";
+						
+						outToClient.writeBytes(statusLine);
+						outToClient.writeBytes("Server: Java HTTP server" + "\r\n");
+						outToClient.writeBytes(contentTypeLine);
+						//outToClient.writeBytes("Date: " + date + "\r\n");
+						outToClient.writeBytes("Connection: close\r\n");
+						outToClient.writeBytes("\r\n");
+						outToClient.close();
+						return true;
+					}
+				}
+				return false;
+			}
+				
+				
+			public String replaceLast(String str) {
+				return str.substring(0,str.length()-1);
+			}
+				
+			//}
+			@Override
+			public void run()
+			{
+				try {
+					String date = getServerTime();
+					
+					HashMap <String, String> headerValueMap = new HashMap<String, String>();
+					//HashMap headerValueMap;
+					//System.out.println("Client HTTP version: " + httpVersion);
+					headerValueMap = parseHttpHeaders(inFromClient);
+					//System.out.println("AFTER VALUES");
+					//System.out.println(value);
+					/*TODO: Change this path to cmd line argument*/
+					System.out.println("servicing request");
+					//port = 5000;
+					//rootPath = "/home/cis455/Desktop"; 
+					String htmlStart = "<html>" +
+							"<title>HTTP Multithreaded server </title>" +
+							"<body><h1 align = \"center\">CIS 455/555 Assignment 1</h1><br>";
+					String htmlEnd = "</body>" +
+							"</html>";
+					String responseString = null;
+					String statusLine = null;
+					String contentTypeLine = null;
+					String serverDetails = "Server: Java HTTPServer" + "\r\n";
+					String contentLength = null;
+					
+					
+					//System.out.println(currentUrl);
+					/*BufferedReader inFromClient = new BufferedReader(new InputStreamReader (connectedClient.getInputStream()));*/
+					//DataOutputStream outToClient = new DataOutputStream(connectedClient.getOutputStream());
+					
+					//System.out.println("From thread " + httpMethod);
+					
+					if(httpMethod.equals("HTTP/1.1"))
+					{
+						if(headerValueMap.get("host") == null)
+						{
+							System.out.println("No host found");
+							responseString = htmlStart + "<h4> Bad request: No host header found </h4>" + htmlEnd;
+							contentLength = "Content-Length: " + responseString.length() + "\r\n";
+							statusLine = "HTTP/1.1 400 Bad Request" + "\r\n";
+							contentTypeLine = "Content-Type: text/html" + "\r\n";
+							
+							outToClient.writeBytes(statusLine);
+							outToClient.writeBytes(serverDetails);
+							outToClient.writeBytes(contentTypeLine);
+							outToClient.writeBytes(contentLength);
+							outToClient.writeBytes("Date: " + date + "\r\n");
+							outToClient.writeBytes("Connection: close\r\n");
+							outToClient.writeBytes("\r\n");
+							outToClient.writeBytes(responseString);
+							outToClient.close();
+							return;
+						}
+					}
+					
+					
+					if(RequestPath.endsWith("/control"))
+					{
+						responseString = htmlStart + getControlPanel(port) + htmlEnd;
+						contentLength = "Content-Length: " + responseString.length() + "\r\n";
+						statusLine = "HTTP/1.1 200 OK \r\n";
+						contentTypeLine = "Content-Type: text/html" + "\r\n";
+						
+						outToClient.writeBytes(statusLine);
+						outToClient.writeBytes(serverDetails);
+						outToClient.writeBytes(contentTypeLine);
+						outToClient.writeBytes(contentLength);
+						outToClient.writeBytes("Date: " + date + "\r\n");
+						outToClient.writeBytes("Connection: close\r\n");
+						outToClient.writeBytes("\r\n");
+						outToClient.writeBytes(responseString);
+						outToClient.close();
+						return;
+					}
+					
+					
+					if(httpMethod.equals("GET") || httpMethod.equals("HEAD"))
+					{
+						/*Implement GET Method*/
+						String relative_path = RequestPath;
+						
+						relative_path = URLDecoder.decode(relative_path);
+						//System.out.println("decoded path is: " + decodedPath);
+						//relative_path = relative_path.replace("%20", " ");
+						String path = rootPath + relative_path;
+						File requiredObject = new File(path);
+						relative_path = relative_path.replace("//", "/");
+						if(relative_path.endsWith("/"))
+						{
+							relative_path = replaceLast(relative_path);
+						}
+						System.out.println("relative path is " + relative_path);
+						
+						
+						/*TODO: Ensure that rootPath is parent of path*/
+						if(!requiredObject.exists())
+						{
+							/*Send 404*/
+							responseString = htmlStart + "<h1>Error: Not Found</h1>" + htmlEnd;
+							contentLength = "Content-Length: " + responseString.length() + "\r\n";
+							statusLine = "HTTP/1.1 404 Not Found" + "\r\n";
+							contentTypeLine = "Content-Type: text/html" + "\r\n";
+							
+							if(headerValueMap.get("Expect") != null)
+							{
+								if(headerValueMap.get("Expect").equals("100-continue"))
+								{
+									outToClient.writeBytes("HTTP/1.1 100 Continue\r\n");
+									outToClient.writeBytes("\r\n");
+								}
+							}
+							outToClient.writeBytes(statusLine);
+							outToClient.writeBytes(serverDetails);
+							outToClient.writeBytes(contentTypeLine);
+							outToClient.writeBytes(contentLength);
+							outToClient.writeBytes("Date: " + date + "\r\n");
+							outToClient.writeBytes("Connection: close\r\n");
+							outToClient.writeBytes("\r\n");
+							if(httpMethod.equals("GET"))
+								outToClient.writeBytes(responseString);
+							outToClient.close();
+							return;	
+						}
+						/*Ensure required directory is not outside the allowed root*/
+						if(!parentCheck(new File(path), new File(rootPath)))
+						{
+							responseString = htmlStart + "Forbidden" + htmlEnd;
+							contentLength = "Content-Length: " + responseString.length() + "\r\n";
+							statusLine = "HTTP/1.1 403 Forbidden" + "\r\n";
+							contentTypeLine = "Content-Type: text/html" + "\r\n";
+							if(headerValueMap.get("Expect") != null)
+							{
+								if(headerValueMap.get("Expect").equals("100-continue"))
+								{
+									outToClient.writeBytes("HTTP/1.1 100 Continue\r\n");
+									outToClient.writeBytes("\r\n");
+								}
+							}
+							outToClient.writeBytes(statusLine);
+							outToClient.writeBytes(serverDetails);
+							outToClient.writeBytes(contentTypeLine);
+							outToClient.writeBytes(contentLength);
+							outToClient.writeBytes("Date: " + date + "\r\n");
+							outToClient.writeBytes("Connection: close\r\n");
+							outToClient.writeBytes("\r\n");
+							if(httpMethod.equals("GET"))
+								outToClient.writeBytes(responseString);
+							outToClient.close();
+							return;
+						}						
+						
+						if(requiredObject.isDirectory())
+						{
+							System.out.println("Detected_directory");
+							String listOfFiles = "<a href = \"http://localhost:"
+											+ Integer.toString(port) + relative_path  + "/..\">../ </a><br>";
+							File [] files;
+							files = requiredObject.listFiles();
+							for(File file :files)
+							{
+								if (file.isDirectory())
+								{
+									listOfFiles = listOfFiles + "<a href = \"http://localhost:"
+											+ Integer.toString(port) + relative_path  + "/" + file.getName() 
+											+ "\">" + file.getName() + "/</a><br>";
+								}
+								else
+								{
+									listOfFiles = listOfFiles + "<a href = \"http://localhost:"
+											+ Integer.toString(port) + relative_path +"/" + file.getName() 
+											+ "\">" + file.getName() + "</a><br>";
+						
+								}
+							}
+							System.out.println(listOfFiles);
+							responseString = htmlStart + listOfFiles + htmlEnd;
+							System.out.println(responseString);
+							contentLength = "Content-Length: " + responseString.length() + "\r\n";
+							statusLine = "HTTP/1.1 200 OK" + "\r\n";
+							contentTypeLine = "Content-Type: text/html" + "\r\n";
+							
+							if(headerValueMap.get("Expect") != null)
+							{
+								if(headerValueMap.get("Expect").equals("100-continue") )
+								{
+									System.out.println("Found expect");
+									outToClient.writeBytes("HTTP/1.1 100 Continue\r\n");
+									outToClient.writeBytes("\r\n");
+								}
+							}
+							outToClient.writeBytes(statusLine);
+							outToClient.writeBytes(serverDetails);
+							outToClient.writeBytes(contentTypeLine);
+							outToClient.writeBytes(contentLength);
+							outToClient.writeBytes("Date: " + date + "\r\n");
+							outToClient.writeBytes("Connection: close\r\n");
+							outToClient.writeBytes("\r\n");
+							if(httpMethod.equals("GET"))
+								outToClient.writeBytes(responseString);
+							outToClient.close();
+						}
+						else
+						{
+							/*code for handling files*/
+							/*Check is resource has been modified*/
+							if(headerValueMap.get("If-Modified-Since") != null)
+							{
+								
+								//convertStringToDate();
+								Date lastModified = new Date(requiredObject.lastModified());
+								Date receivedDate = convertStringToDate(headerValueMap.get("If-Modified-Since"));
+						
+								if(receivedDate != null)
+								{
+									System.out.println("Parsed this date: " + receivedDate);
+									if(lastModified.before(receivedDate))
+									{
+										responseString = htmlStart + "not modified" + htmlEnd;
+										System.out.println(responseString);
+										contentLength = "Content-Length: " + responseString.length() + "\r\n";
+										statusLine = "HTTP/1.1 304 not modified" + "\r\n";
+										contentTypeLine = "Content-Type: text/html" + "\r\n";
+										if(headerValueMap.get("Expect") != null)
+										{
+											if(headerValueMap.get("Expect").equals("100-continue"))
+											{
+												System.out.println("Found expect");
+												outToClient.writeBytes("HTTP/1.1 100 Continue\r\n");
+												outToClient.writeBytes("\r\n");
+											}
+										}
+										outToClient.writeBytes(statusLine);
+										outToClient.writeBytes(serverDetails);
+										outToClient.writeBytes(contentTypeLine);
+										outToClient.writeBytes(contentLength);
+										outToClient.writeBytes("Date: " + date + "\r\n");
+										outToClient.writeBytes("Connection: close\r\n");
+										outToClient.writeBytes("\r\n");
+										outToClient.close();
+										return;
+									}
+								}
+							}
+							
+							if(headerValueMap.get("If-Unmodified-Since") != null)
+							{
+								if(processIfUnmodifiedSince(headerValueMap.get("If-Unmodified-Since"), requiredObject, outToClient))
+									return; /*this function has sent the response. Simply return*/
+							}
+							System.out.println("FOUND A FILE!");
+							FileInputStream fileStream = new FileInputStream(path);
+							contentLength = "Content-Length: " + Integer.toString(fileStream.available()) + "\r\n";
+							if (path.endsWith(".html") || path.endsWith(".html"))
+							{
+								contentTypeLine = "Content-Type: text/html" + "\r\n";
+							}
+							else if(path.endsWith(".pdf"))
+							{
+								contentTypeLine = "Content-Type: application/pdf" + "\r\n";
+							}
+							else if(path.endsWith(".txt"))
+							{
+								contentTypeLine = "Content-Type: text/plain" + "\r\n";
+							}
+							else if(path.endsWith(".jpg") || path.endsWith(".jpeg"))
+							{
+								contentTypeLine = "Content-Type: image/jpeg" + "\r\n";
+							}
+							else if(path.endsWith(".png"))
+							{
+								contentTypeLine = "Content-Type: image/png" + "\r\n";
+							}
+							else if(path.endsWith(".gif"))
+							{
+								contentTypeLine = "Content-Type: image/gif" + "\r\n";
+							}
+							else
+							{
+								contentTypeLine = "Content-Type: application/octet-stream" + "\r\n";
+							}
+							
+							statusLine = "HTTP/1.1 200 OK" + "\r\n";
+							if(headerValueMap.get("Expect") != null)
+							{
+								if(headerValueMap.get("Expect").equals("100-continue"))
+								{
+									outToClient.writeBytes("HTTP/1.1 100 Continue\r\n");
+									outToClient.writeBytes("\r\n");
+								}
+							}
+							outToClient.writeBytes(statusLine);
+							outToClient.writeBytes(serverDetails);
+							outToClient.writeBytes(contentTypeLine);
+							outToClient.writeBytes(contentLength);
+							outToClient.writeBytes("Date: " + date + "\r\n");
+							outToClient.writeBytes("Connection: close\r\n");
+							outToClient.writeBytes("\r\n");
+							if(httpMethod.equals("GET"))
+							{
+								byte[] buffer = new byte[1024] ;
+								int bytesRead;
+								
+								while ((bytesRead = fileStream.read(buffer)) != -1 )
+								{
+									outToClient.write(buffer, 0, bytesRead);
+								}
+								fileStream.close();
+							}
+							outToClient.close();
+						}
+					}
+					else
+					{
+						responseString = htmlStart + "Unsupported method: " + httpMethod + htmlEnd;
+						contentLength = "Content-Length: " + responseString.length() + "\r\n";
+						statusLine = "HTTP/1.1 405 Method Not Allowed" + "\r\n";
+						contentTypeLine = "Content-Type: text/html" + "\r\n";
+						
+						outToClient.writeBytes(statusLine);
+						outToClient.writeBytes(serverDetails);
+						outToClient.writeBytes(contentTypeLine);
+						outToClient.writeBytes(contentLength);
+						outToClient.writeBytes("Date: " + date + "\r\n");
+						outToClient.writeBytes("Connection: close\r\n");
+						outToClient.writeBytes("\r\n");
+						outToClient.writeBytes(responseString);
+						outToClient.close();
+						return;
+
+					}
+
+				} catch (IOException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+			}
+			 boolean parentCheck(File maybeChild, File possibleParent) throws IOException
+			 {
+			     final File parent = possibleParent.getCanonicalFile();
+			     if (!parent.exists() || !parent.isDirectory()) {
+			         // this cannot possibly be the parent
+			         return false;
+			     }
+
+			     File child = maybeChild.getCanonicalFile();
+			     while (child != null) {
+			         if (child.equals(parent)) {
+			             return true;
+			         }
+			         child = child.getParentFile();
+			     }
+			     // No match found, and we've hit the root directory
+			     return false;
+			 }			
+		}
+}

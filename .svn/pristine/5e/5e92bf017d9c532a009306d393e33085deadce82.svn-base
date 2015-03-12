@@ -1,0 +1,46 @@
+package edu.upenn.cis.cis455.webserver;
+
+import edu.upenn.cis.cis455.webserver.HttpServer.HttpRequestHandler;
+
+public class PoolThread extends Thread{
+		public String currentUrl = null;
+	    private BlockingQueue taskQueue = null;
+	    private boolean isStopped = false;
+	    private boolean isRunning = false; 
+	    public PoolThread(BlockingQueue queue){
+	        taskQueue = queue;
+	    }
+
+	    public void run(){
+	        while(!isStopped()){
+	            try{
+	                Runnable runnable = (Runnable) taskQueue.dequeue();
+	                HttpRequestHandler temp = (HttpRequestHandler)runnable;
+	                currentUrl = temp.currentUrl;
+	                isRunning = true;
+	                runnable.run();
+	                isRunning = false;
+	                currentUrl = null;
+	            } catch(InterruptedException e){
+	            	System.out.println("Shutting down thread");
+	            	return;
+	                //log or otherwise report exception,
+	            }
+	        }
+	    }
+
+	    public synchronized void doStop(){
+	    	if((this.getState() == Thread.State.WAITING)||(isRunning == false) || (this.getState() == Thread.State.BLOCKED))
+	    	{
+	    		this.interrupt();
+	    	}
+	    	else
+	    	{
+	    		isStopped = true;
+	    	}
+	    }
+
+	    public synchronized boolean isStopped(){
+	        return isStopped;
+	    }
+}
