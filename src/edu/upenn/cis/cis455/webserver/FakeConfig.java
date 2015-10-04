@@ -6,9 +6,6 @@ import org.apache.log4j.Logger;
 
 import java.util.*;
 
-/**
- * @author Nick Taylor
- */
 public class FakeConfig implements ServletConfig {
 	private String name;
 	private FakeContext context;
